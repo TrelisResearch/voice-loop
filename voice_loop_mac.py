@@ -502,22 +502,41 @@ def main():
 
         async def _play():
             nonlocal out_stream, interrupted
+            loop = asyncio.get_running_loop()
+            # Synthesis queue: at most 1 pre-synthesized sentence buffered so the
+            # synthesizer stays exactly one sentence ahead of the player.
+            synth_q: asyncio.Queue = asyncio.Queue(maxsize=1)
+
+            async def _synthesizer():
+                """Run kokoro.create() in a thread so synthesis overlaps playback."""
+                for sentence in sentence_iter:
+                    if interrupted:
+                        break
+                    samples, sr = await loop.run_in_executor(
+                        None,
+                        lambda s=sentence: kokoro.create(
+                            s, voice=args.voice, speed=1.0,
+                            lang=_lang_from_voice(args.voice)
+                        ),
+                    )
+                    await synth_q.put((samples, sr))
+                await synth_q.put(None)
+
+            synth_task = asyncio.create_task(_synthesizer())
             first_sentence = True
-            for sentence in sentence_iter:
-                if interrupted:
-                    break
-                # Between sentences: handle gap mic chunks before the new TTS
-                # stream starts writing to tts_16k_buf so mic_pos is correct.
-                if not first_sentence and pad_gap_and_check():
-                    interrupted = True
-                    print("  [voice interrupt]", flush=True)
-                    break
-                first_sentence = False
-                sentence_first_chunk = True
-                tts_sentence_stream = kokoro.create_stream(
-                    sentence, voice=args.voice, speed=1.0, lang=_lang_from_voice(args.voice)
-                )
-                async for chunk_samples, sr in tts_sentence_stream:
+            try:
+                while True:
+                    item = await synth_q.get()
+                    if item is None or interrupted:
+                        break
+                    samples, sr = item
+
+                    # Between sentences: drain gap mic chunks with reverb blanking.
+                    if not first_sentence and pad_gap_and_check():
+                        interrupted = True
+                        print("  [voice interrupt]", flush=True)
+                        break
+
                     if out_stream is None:
                         if chime_sound is not None:
                             _wait_for_chime_gap()
@@ -525,16 +544,15 @@ def main():
                         out_stream = sd.OutputStream(samplerate=sr, channels=1, dtype="float32")
                         out_stream.start()
                         drain_audio_q()
-                    # Per-sentence inhibit reset: give each sentence its own 0.5s
-                    # protection window and a clean consec_speech counter so
-                    # residual state from the inter-sentence gap can't accumulate.
-                    if sentence_first_chunk:
-                        vad.reset_states()
-                        state["play_start"] = _time.monotonic()
-                        state["consec_speech"] = 0
-                        sentence_first_chunk = False
-                    _append_ref(chunk_samples, sr)
-                    data = chunk_samples.reshape(-1, 1)
+
+                    # Per-sentence inhibit reset.
+                    vad.reset_states()
+                    state["play_start"] = _time.monotonic()
+                    state["consec_speech"] = 0
+                    first_sentence = False
+
+                    _append_ref(samples, sr)
+                    data = samples.reshape(-1, 1)
                     for i in range(0, len(data), 4096):
                         if select.select([sys.stdin], [], [], 0)[0]:
                             sys.stdin.read(1); interrupted = True
@@ -545,8 +563,14 @@ def main():
                         out_stream.write(data[i:i+4096])
                     if interrupted:
                         break
-            if out_stream:
-                out_stream.stop(); out_stream.close()
+            finally:
+                synth_task.cancel()
+                try:
+                    await synth_task
+                except asyncio.CancelledError:
+                    pass
+                if out_stream:
+                    out_stream.stop(); out_stream.close()
 
         asyncio.run(_play())
         if interrupted and state["consec_speech"] < 3:
@@ -592,10 +616,17 @@ def main():
                 response_parts: list[str] = []
 
                 def _collecting(gen):
+                    last = None
                     for s in gen:
                         response_parts.append(s)
                         print(f"> {s}", flush=True)
                         yield s
+                        last = s
+                    if last and last[-1] not in ".!?":
+                        offer = "Wait, I've gone on a bit — want me to continue?"
+                        response_parts.append(offer)
+                        print(f"> {offer}", flush=True)
+                        yield offer
 
                 print()
                 if kokoro:

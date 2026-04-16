@@ -508,14 +508,33 @@ def main():
             synth_q: asyncio.Queue = asyncio.Queue(maxsize=1)
 
             async def _synthesizer():
-                """Run kokoro.create() in a thread so synthesis overlaps playback."""
+                """Run kokoro.create() in a thread so synthesis overlaps playback.
+
+                Sentences are grouped in threes before synthesis so Kokoro has
+                enough context for natural prosody across sentence boundaries.
+                """
+                GROUP = 3
+                buf: list[str] = []
                 for sentence in sentence_iter:
                     if interrupted:
                         break
+                    buf.append(sentence)
+                    if len(buf) == GROUP:
+                        text = " ".join(buf); buf = []
+                        samples, sr = await loop.run_in_executor(
+                            None,
+                            lambda t=text: kokoro.create(
+                                t, voice=args.voice, speed=1.0,
+                                lang=_lang_from_voice(args.voice)
+                            ),
+                        )
+                        await synth_q.put((samples, sr))
+                if buf and not interrupted:
+                    text = " ".join(buf)
                     samples, sr = await loop.run_in_executor(
                         None,
-                        lambda s=sentence: kokoro.create(
-                            s, voice=args.voice, speed=1.0,
+                        lambda t=text: kokoro.create(
+                            t, voice=args.voice, speed=1.0,
                             lang=_lang_from_voice(args.voice)
                         ),
                     )

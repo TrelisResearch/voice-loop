@@ -23,7 +23,7 @@ A minimal on-device voice agent loop. Runs entirely on Mac M4 / Apple Silicon.
 ## Setup
 
 ```bash
-brew install portaudio espeak-ng
+brew install portaudio espeak-ng uv
 git clone https://github.com/TrelisResearch/voice-loop.git
 cd voice-loop
 uv sync

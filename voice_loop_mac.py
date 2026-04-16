@@ -513,7 +513,7 @@ def main():
                 Sentences are grouped in threes before synthesis so Kokoro has
                 enough context for natural prosody across sentence boundaries.
                 """
-                GROUP = 3
+                GROUP = 2
                 buf: list[str] = []
                 for sentence in sentence_iter:
                     if interrupted:

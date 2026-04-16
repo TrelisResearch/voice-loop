@@ -594,8 +594,10 @@ def main():
                 def _collecting(gen):
                     for s in gen:
                         response_parts.append(s)
+                        print(f"> {s}", flush=True)
                         yield s
 
+                print()
                 if kokoro:
                     play_tts_stream(_collecting(stream_sentences(messages)))
                 else:
@@ -606,7 +608,7 @@ def main():
                         sd.stop()
 
                 response = " ".join(response_parts)
-                print(f"\n> {response}\n", flush=True)
+                print()
             history.append({"user": heard, "assistant": response})
             if len(history) > MAX_HISTORY:
                 history.pop(0)

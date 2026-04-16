@@ -58,7 +58,7 @@ def _split_sentences(text: str) -> list[str]:
         p = p.strip()
         if not p:
             continue
-        carry = (carry + " " + p).strip() if carry else p
+        carry = f"{carry} {p}".strip() if carry else p
         if len(carry) >= _SENT_MIN_CHARS:
             parts.append(carry)
             carry = ""
@@ -277,6 +277,9 @@ def main():
         cancel = threading.Event()
 
         def _worker():
+            def _merge(carry, fragment):
+                return f"{carry} {fragment}".strip() if carry else fragment
+
             try:
                 if _mlx_stream_generate is not None:
                     token_buf, carry = "", ""
@@ -290,20 +293,18 @@ def main():
                     ):
                         if cancel.is_set():
                             return
-                        token = result.text if hasattr(result, "text") else str(result)
-                        token_buf += token
+                        token_buf += result.text if hasattr(result, "text") else str(result)
                         while True:
                             m = _SENT_END.search(token_buf)
                             if not m:
                                 break
-                            candidate = token_buf[: m.start() + 1].strip()
-                            token_buf = token_buf[m.end() :]
-                            carry = (carry + " " + candidate).strip() if carry else candidate
+                            carry = _merge(carry, token_buf[: m.start() + 1].strip())
+                            token_buf = token_buf[m.end():]
                             if len(carry) >= _SENT_MIN_CHARS:
                                 q.put(carry)
                                 carry = ""
                     # Flush remainder (merge with any carry)
-                    remainder = (carry + " " + token_buf).strip() if token_buf.strip() else carry
+                    remainder = _merge(carry, token_buf.strip()) if token_buf.strip() else carry
                     if remainder:
                         q.put(remainder)
                 else:
@@ -424,15 +425,17 @@ def main():
         out_stream, interrupted = None, False
         tts_16k_buf: list[np.ndarray] = []
         # Cache for np.concatenate(tts_16k_buf) — recomputed only when list grows.
-        _concat_cache: dict = {"arr": np.array([], dtype=np.float32), "len": 0}
+        _cache_arr = np.array([], dtype=np.float32)
+        _cache_len = 0
         state = {"play_start": None, "consec_speech": 0, "mic_pos": 0}
         aec_process = make_aec_processor() if make_aec_processor else None
 
         def _get_tts_concat():
-            if len(tts_16k_buf) != _concat_cache["len"]:
-                _concat_cache["arr"] = np.concatenate(tts_16k_buf) if tts_16k_buf else np.array([], dtype=np.float32)
-                _concat_cache["len"] = len(tts_16k_buf)
-            return _concat_cache["arr"]
+            nonlocal _cache_arr, _cache_len
+            if len(tts_16k_buf) != _cache_len:
+                _cache_arr = np.concatenate(tts_16k_buf) if tts_16k_buf else np.array([], dtype=np.float32)
+                _cache_len = len(tts_16k_buf)
+            return _cache_arr
 
         def _append_ref(chunk_samples, sr):
             if aec_process is None:
@@ -446,12 +449,11 @@ def main():
                 )
 
         def check_barge_in():
-            if not (aec_process and state["play_start"]):
-                return False
-            if _time.monotonic() - state["play_start"] < 0.5:
+            if not (aec_process and state["play_start"] and
+                    _time.monotonic() - state["play_start"] >= 0.5):
                 return False
             tts_concat = _get_tts_concat()
-            if len(tts_concat) == 0:
+            if not len(tts_concat):
                 return False
             while not audio_q.empty():
                 mic_chunk = audio_q.get_nowait()
@@ -510,9 +512,18 @@ def main():
             async def _synthesizer():
                 """Run kokoro.create() in a thread so synthesis overlaps playback.
 
-                Sentences are grouped in threes before synthesis so Kokoro has
+                Sentences are grouped in twos before synthesis so Kokoro has
                 enough context for natural prosody across sentence boundaries.
                 """
+                async def _synth(text):
+                    return await loop.run_in_executor(
+                        None,
+                        lambda t=text: kokoro.create(
+                            t, voice=args.voice, speed=1.0,
+                            lang=_lang_from_voice(args.voice),
+                        ),
+                    )
+
                 GROUP = 2
                 buf: list[str] = []
                 for sentence in sentence_iter:
@@ -520,25 +531,10 @@ def main():
                         break
                     buf.append(sentence)
                     if len(buf) == GROUP:
-                        text = " ".join(buf); buf = []
-                        samples, sr = await loop.run_in_executor(
-                            None,
-                            lambda t=text: kokoro.create(
-                                t, voice=args.voice, speed=1.0,
-                                lang=_lang_from_voice(args.voice)
-                            ),
-                        )
-                        await synth_q.put((samples, sr))
+                        await synth_q.put(await _synth(" ".join(buf)))
+                        buf = []
                 if buf and not interrupted:
-                    text = " ".join(buf)
-                    samples, sr = await loop.run_in_executor(
-                        None,
-                        lambda t=text: kokoro.create(
-                            t, voice=args.voice, speed=1.0,
-                            lang=_lang_from_voice(args.voice)
-                        ),
-                    )
-                    await synth_q.put((samples, sr))
+                    await synth_q.put(await _synth(" ".join(buf)))
                 await synth_q.put(None)
 
             synth_task = asyncio.create_task(_synthesizer())
@@ -635,17 +631,17 @@ def main():
                 response_parts: list[str] = []
 
                 def _collecting(gen):
-                    last = None
-                    for s in gen:
+                    def _emit(s):
                         response_parts.append(s)
                         print(f"> {s}", flush=True)
-                        yield s
+                        return s
+
+                    last = None
+                    for s in gen:
+                        yield _emit(s)
                         last = s
                     if last and last[-1] not in ".!?":
-                        offer = "Wait, I've gone on a bit — want me to continue?"
-                        response_parts.append(offer)
-                        print(f"> {offer}", flush=True)
-                        yield offer
+                        yield _emit("Wait, I've gone on a bit — want me to continue?")
 
                 print()
                 if kokoro:

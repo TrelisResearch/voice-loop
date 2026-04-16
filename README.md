@@ -2,6 +2,8 @@
 
 A minimal on-device voice agent loop. Runs entirely on Mac M4 / Apple Silicon.
 
+**Now with even snappier audio responses** — TTS starts on the first sentence while the LLM is still generating the rest, so you hear the reply almost immediately.
+
 > Need a custom voice model or production voice agent? See [Trelis Voice AI Services](https://trelis.com/voice-ai-services/).
 
 ## Features
@@ -94,7 +96,7 @@ Only the higher-quality voices are listed here:
 3. **Smart Turn** confirms end-of-turn on silence (default on)
 4. **Moonshine** transcribes your audio to text (CPU)
 5. **Gemma 4 E4B** responds using SOUL.md (+ MEMORY.md if `--memory`) as system prompt
-6. **Kokoro** synthesizes speech, streams audio
+6. **Kokoro** synthesizes sentence pairs in a background thread while the previous pair plays — gapless, low-latency audio
 7. **WebRTC AEC3** cleans mic during TTS playback → Silero VAD on cleaned audio → voice interrupt
 
 Press any key during TTS to interrupt.

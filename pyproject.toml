@@ -15,4 +15,5 @@ dependencies = [
     "torch>=2.0",          # used by silero-vad (pulled in transitively but declared explicitly)
     "kokoro-onnx>=0.4",    # TTS (default on)
     "soundfile>=0.12",     # TTS audio I/O
+    "python-dotenv>=1.2.2",
 ]
